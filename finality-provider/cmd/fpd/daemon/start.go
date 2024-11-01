@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic/finalitygadget"
+	"github.com/gin-gonic/gin"
 	"net"
 	"path/filepath"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	clsservice "github.com/babylonlabs-io/finality-provider/clientcontroller/generic/service"
 	fpcmd "github.com/babylonlabs-io/finality-provider/finality-provider/cmd"
 	fpcfg "github.com/babylonlabs-io/finality-provider/finality-provider/config"
 	"github.com/babylonlabs-io/finality-provider/finality-provider/service"
@@ -81,6 +84,11 @@ func runStartCmd(ctx client.Context, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create db backend: %w", err)
 	}
 
+	fg, err := finalitygadget.NewFinalityGadgetCustom(cfg.FGConfig, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create finality gadget: %w", err)
+	}
+
 	fpApp, err := loadApp(logger, cfg, dbBackend)
 	if err != nil {
 		return fmt.Errorf("failed to load app: %w", err)
@@ -96,8 +104,22 @@ func runStartCmd(ctx client.Context, cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if cfg.ChainType == "generic" {
+		go func() {
+			fsdk := clsservice.NewFinalitySDKHandler(cfg.ConsumerGenericConfig.ServiceRPC, fg)
+
+			router := gin.Default()
+			router.GET("/api/v1/block/:height", fsdk.QueryData)
+			err := router.Run(":" + cfg.APIPort)
+			if err != nil {
+				logger.Error("failed to start API server", zap.Error(err))
+			}
+		}()
+	}
+
 	fpServer := service.NewFinalityProviderServer(cfg, logger, fpApp, dbBackend, shutdownInterceptor)
 	return fpServer.RunUntilShutdown()
+
 }
 
 // loadApp initialize an finality provider app based on config and flags set.

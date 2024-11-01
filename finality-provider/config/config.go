@@ -51,6 +51,7 @@ var (
 	defaultEOTSManagerAddress = "127.0.0.1:" + strconv.Itoa(eotscfg.DefaultRPCPort)
 	DefaultRpcListener        = "127.0.0.1:" + strconv.Itoa(DefaultRPCPort)
 	DefaultDataDir            = DataDir(DefaultFpdDir)
+	StorageChainType          = "storage"
 )
 
 // Config is the main config for the fpd cli command
@@ -70,6 +71,7 @@ type Config struct {
 	EOTSManagerAddress       string        `long:"eotsmanageraddress" description:"The address of the remote EOTS manager; Empty if the EOTS manager is running locally"`
 	MaxNumFinalityProviders  uint32        `long:"maxnumfinalityproviders" description:"The maximum number of finality-provider instances running concurrently within the daemon"`
 	SyncFpStatusInterval     time.Duration `long:"syncfpstatusinterval" description:"The duration of time that it should sync FP status with the client blockchain"`
+	APIPort                  string        `long:"api-port" description:"The port on which the API is listening on"`
 
 	BitcoinNetwork string `long:"bitcoinnetwork" description:"Bitcoin network to run on" choise:"mainnet" choice:"regtest" choice:"testnet" choice:"simnet" choice:"signet"`
 
@@ -84,6 +86,10 @@ type Config struct {
 	OPStackL2Config *OPStackL2Config `group:"opstackl2" namespace:"opstackl2"`
 
 	CosmwasmConfig *CosmwasmConfig `group:"wasm" namespace:"wasm"`
+
+	ConsumerGenericConfig *ConsumerGenericConfig `group:"genericconsumer" namespace:"genericconsumer"`
+
+	FGConfig *FGConfig `group:"fg" namespace:"fg"`
 
 	RpcListener string `long:"rpclistener" description:"the listener for RPC connections, e.g., 127.0.0.1:1234"`
 
@@ -207,6 +213,10 @@ func (cfg *Config) Validate() error {
 
 	if err := cfg.Metrics.Validate(); err != nil {
 		return fmt.Errorf("invalid metrics config")
+	}
+
+	if cfg.ChainType == "generic" && cfg.ConsumerGenericConfig.ServiceRPC == "" {
+		return fmt.Errorf("no service RPC specified")
 	}
 
 	// All good, return the sanitized result.
