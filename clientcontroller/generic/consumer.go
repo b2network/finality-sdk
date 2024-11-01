@@ -14,6 +14,7 @@ import (
 	bbntypes "github.com/babylonlabs-io/babylon/types"
 	btcstakingtypes "github.com/babylonlabs-io/babylon/x/btcstaking/types"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/api"
+	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic/finalitygadget"
 	cwclient "github.com/babylonlabs-io/finality-provider/cosmwasmclient/client"
 	cwconfig "github.com/babylonlabs-io/finality-provider/cosmwasmclient/config"
 	fpcfg "github.com/babylonlabs-io/finality-provider/finality-provider/config"
@@ -27,6 +28,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"github.com/spf13/cast"
 	"go.uber.org/zap"
+	"math"
 )
 
 const (
@@ -41,10 +43,11 @@ type GenericConsumerController struct {
 	bbnClient  *bbnclient.Client
 	namespace  string
 	serviceRpc string
+	fg         *finalitygadget.FinalityGadgetCustom
 	logger     *zap.Logger
 }
 
-func NewGenericConsumerController(cfg *fpcfg.ConsumerGenericConfig, logger *zap.Logger) (*GenericConsumerController, error) {
+func NewGenericConsumerController(cfg *fpcfg.ConsumerGenericConfig, fg *finalitygadget.FinalityGadgetCustom, logger *zap.Logger) (*GenericConsumerController, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config for storage consumer controller")
 	}
@@ -79,6 +82,7 @@ func NewGenericConsumerController(cfg *fpcfg.ConsumerGenericConfig, logger *zap.
 		bbnClient:  bc,
 		serviceRpc: cfg.ServiceRPC,
 		namespace:  cfg.Namespace,
+		fg:         fg,
 		logger:     logger,
 	}, nil
 }
@@ -276,7 +280,7 @@ func (cc GenericConsumerController) QueryFinalityProviderHasPower(fpPk *btcec.Pu
 
 func (cc GenericConsumerController) QueryLatestFinalizedBlock() (*types.BlockInfo, error) {
 	client := resty.New()
-	resp, err := client.R().Get(cc.serviceRpc + "/v1/api/latest-block?namespace=" + cc.namespace)
+	resp, err := client.R().Get(cc.serviceRpc + "/v1/api/finalized-block?namespace=" + cc.namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -285,9 +289,20 @@ func (cc GenericConsumerController) QueryLatestFinalizedBlock() (*types.BlockInf
 	if err != nil {
 		return nil, err
 	}
-	//TODO
-	latestBlockNum := latestBlock.Data.LatestBlock - 32
-	return cc.QueryBlock(latestBlockNum)
+	if latestBlock.Error != "" {
+		return nil, errors.New(latestBlock.Error)
+	}
+
+	hashByte, err := hex.DecodeString(latestBlock.Data.Hash[2:])
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.BlockInfo{
+		Height: latestBlock.Data.Height,
+		Hash:   hashByte,
+	}, nil
+
 }
 
 func (cc GenericConsumerController) QueryLastPublicRandCommit(fpPk *btcec.PublicKey) (*types.PubRandCommit, error) {
@@ -346,6 +361,12 @@ func (cc GenericConsumerController) QueryBlock(height uint64) (*types.BlockInfo,
 		return nil, err
 	}
 
+	cc.logger.Debug(
+		"QueryBlock",
+		zap.Uint64("height", height),
+		zap.String("block_hash", hex.EncodeToString(hashByte)),
+	)
+
 	return &types.BlockInfo{
 		Height: l2BlockRsp.Data.Height,
 		Hash:   hashByte,
@@ -380,13 +401,19 @@ func (cc GenericConsumerController) QueryLatestBlockHeight() (uint64, error) {
 }
 
 func (cc GenericConsumerController) QueryActivatedHeight() (uint64, error) {
-	//res, err := cc.bbnClient.QueryClient.ActivatedHeight()
-	//if err != nil {
-	//	return 0, fmt.Errorf("failed to query activated height: %w", err)
-	//}
-	//
-	//return res.Height, nil
-	return 0, nil
+	activatedTimestamp, err := cc.fg.QueryBtcStakingActivatedTimestamp()
+	if err != nil {
+		cc.logger.Error("failed to query BTC staking activate timestamp", zap.Error(err))
+		return math.MaxUint64, err
+	}
+
+	l2BlockNumber, err := cc.GetBlockNumberByTimestamp(context.Background(), activatedTimestamp)
+	if err != nil {
+		cc.logger.Error("failed to convert L2 block number from the given BTC staking activation timestamp", zap.Error(err))
+		return math.MaxUint64, err
+	}
+
+	return l2BlockNumber, nil
 }
 
 func (cc GenericConsumerController) Close() error {
@@ -416,4 +443,79 @@ func (cc *GenericConsumerController) isDelegationActive(
 	}
 
 	return true, nil
+}
+
+// GetBlockNumberByTimestamp returns the L2 block number for the given BTC staking activation timestamp.
+// It uses a binary search to find the block number.
+func (cc *GenericConsumerController) GetBlockNumberByTimestamp(ctx context.Context, targetTimestamp uint64) (uint64, error) {
+	// Check if the target timestamp is after the latest block
+	client := resty.New()
+	resp, err := client.R().Get(cc.serviceRpc + "/v1/api/latest-block?namespace=" + cc.namespace)
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	var latestBlock *GetBlockResponse
+	err = json.Unmarshal(resp.Body(), &latestBlock)
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	if latestBlock.Error != "" {
+		return math.MaxUint64, errors.New(latestBlock.Error)
+	}
+	if targetTimestamp > latestBlock.Data.Timestamp {
+		return math.MaxUint64, fmt.Errorf("target timestamp %d is after the latest block timestamp %d", targetTimestamp, latestBlock.Data.Timestamp)
+	}
+
+	// Check if the target timestamp is before the first block
+	respFirstBlock, err := client.R().Get(cc.serviceRpc + "/v1/api/get-block?namespace=" + cc.namespace + "&height=" + cast.ToString(1))
+	var firstBlock *GetBlockResponse
+
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	err = json.Unmarshal(respFirstBlock.Body(), &firstBlock)
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	if firstBlock.Error != "" {
+		return math.MaxUint64, errors.New(firstBlock.Error)
+	}
+
+	// let's say block 0 is at t0 and block 1 at t1
+	// if t0 < targetTimestamp < t1, the activated height should be block 1
+	if targetTimestamp < firstBlock.Data.Timestamp {
+		return uint64(1), nil
+	}
+
+	// binary search between block 1 and the latest block
+	// start from block 1, b/c some L2s such as OP mainnet, block 0 is genesis block with timestamp 0
+	lowerBound := uint64(1)
+	upperBound := latestBlock.Data.Height
+
+	for lowerBound <= upperBound {
+		midBlockNumber := (lowerBound + upperBound) / 2
+		respBlock, err := client.R().Get(cc.serviceRpc + "/v1/api/get-block?namespace=" + cc.namespace + "&height=" + cast.ToString(midBlockNumber))
+		var block *GetBlockResponse
+
+		if err != nil {
+			return math.MaxUint64, err
+		}
+		err = json.Unmarshal(respBlock.Body(), &block)
+		if err != nil {
+			return math.MaxUint64, err
+		}
+		if firstBlock.Error != "" {
+			return math.MaxUint64, errors.New(block.Error)
+		}
+
+		if block.Data.Timestamp < targetTimestamp {
+			lowerBound = midBlockNumber + 1
+		} else if block.Data.Timestamp > targetTimestamp {
+			upperBound = midBlockNumber - 1
+		} else {
+			return midBlockNumber, nil
+		}
+	}
+
+	return lowerBound, nil
 }

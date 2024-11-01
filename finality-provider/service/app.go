@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic/finalitygadget"
 	"strings"
 	"sync"
 	"time"
@@ -59,12 +60,13 @@ func NewFinalityProviderAppFromConfig(
 	cfg *fpcfg.Config,
 	db kvdb.Backend,
 	logger *zap.Logger,
+	fg *finalitygadget.FinalityGadgetCustom,
 ) (*FinalityProviderApp, error) {
 	cc, err := fpcc.NewClientController(cfg, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rpc client for the Babylon chain: %v", err)
 	}
-	consumerCon, err := fpcc.NewConsumerController(cfg, logger)
+	consumerCon, err := fpcc.NewConsumerController(cfg, logger, fg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rpc client for the consumer chain %s: %v", cfg.ChainType, err)
 	}

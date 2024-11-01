@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+	"github.com/babylonlabs-io/finality-gadget/db"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic/finalitygadget"
 	"github.com/gin-gonic/gin"
 	"net"
@@ -84,12 +86,29 @@ func runStartCmd(ctx client.Context, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create db backend: %w", err)
 	}
 
-	fg, err := finalitygadget.NewFinalityGadgetCustom(cfg.FGConfig, logger)
+	// Init local DB for storing and querying blocks
+	db, err := db.NewBBoltHandler(cfg.DBFilePath, logger)
+	if err != nil {
+		return fmt.Errorf("failed to create DB handler: %w", err)
+	}
+	defer db.Close()
+	err = db.CreateInitialSchema()
+	if err != nil {
+		return fmt.Errorf("create initial buckets error: %w", err)
+	}
+
+	fg, err := finalitygadget.NewFinalityGadgetCustom(cfg.FGConfig, db, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create finality gadget: %w", err)
 	}
 
-	fpApp, err := loadApp(logger, cfg, dbBackend)
+	// Create a cancellable context
+	fgCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Start monitoring BTC staking activation
+	go fg.MonitorBtcStakingActivation(fgCtx)
+
+	fpApp, err := loadApp(logger, cfg, dbBackend, fg)
 	if err != nil {
 		return fmt.Errorf("failed to load app: %w", err)
 	}
@@ -127,8 +146,9 @@ func loadApp(
 	logger *zap.Logger,
 	cfg *fpcfg.Config,
 	dbBackend walletdb.DB,
+	fg *finalitygadget.FinalityGadgetCustom,
 ) (*service.FinalityProviderApp, error) {
-	fpApp, err := service.NewFinalityProviderAppFromConfig(cfg, dbBackend, logger)
+	fpApp, err := service.NewFinalityProviderAppFromConfig(cfg, dbBackend, logger, fg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create finality-provider app: %v", err)
 	}

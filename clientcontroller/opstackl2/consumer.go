@@ -7,6 +7,7 @@ import (
 	"fmt"
 	bbnclient "github.com/babylonlabs-io/babylon/client/client"
 	btcstakingtypes "github.com/babylonlabs-io/babylon/x/btcstaking/types"
+	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic/finalitygadget"
 	sdkquerytypes "github.com/cosmos/cosmos-sdk/types/query"
 	"math"
 	"math/big"
@@ -16,7 +17,6 @@ import (
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	bbnapp "github.com/babylonlabs-io/babylon/app"
 	bbntypes "github.com/babylonlabs-io/babylon/types"
-	fgclient "github.com/babylonlabs-io/finality-gadget/client"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/api"
 	cwclient "github.com/babylonlabs-io/finality-provider/cosmwasmclient/client"
 	cwconfig "github.com/babylonlabs-io/finality-provider/cosmwasmclient/config"
@@ -45,11 +45,13 @@ type OPStackL2ConsumerController struct {
 	CwClient   *cwclient.Client
 	opl2Client *ethclient.Client
 	bbnClient  *bbnclient.Client
+	fg         *finalitygadget.FinalityGadgetCustom
 	logger     *zap.Logger
 }
 
 func NewOPStackL2ConsumerController(
 	opl2Cfg *fpcfg.OPStackL2Config,
+	fg *finalitygadget.FinalityGadgetCustom,
 	logger *zap.Logger,
 ) (*OPStackL2ConsumerController, error) {
 	if opl2Cfg == nil {
@@ -90,6 +92,7 @@ func NewOPStackL2ConsumerController(
 		cwClient,
 		opl2Client,
 		bc,
+		fg,
 		logger,
 	}, nil
 }
@@ -416,13 +419,13 @@ func (cc *OPStackL2ConsumerController) QueryIsBlockFinalized(height uint64) (boo
 
 // QueryActivatedHeight returns the L2 block number at which the finality gadget is activated.
 func (cc *OPStackL2ConsumerController) QueryActivatedHeight() (uint64, error) {
-	finalityGadgetClient, err := fgclient.NewFinalityGadgetGrpcClient(cc.Cfg.BabylonFinalityGadgetRpc)
-	if err != nil {
-		cc.logger.Error("failed to initialize Babylon Finality Gadget Grpc client", zap.Error(err))
-		return math.MaxUint64, err
-	}
+	//finalityGadgetClient, err := fgclient.NewFinalityGadgetGrpcClient(cc.Cfg.BabylonFinalityGadgetRpc)
+	//if err != nil {
+	//	cc.logger.Error("failed to initialize Babylon Finality Gadget Grpc client", zap.Error(err))
+	//	return math.MaxUint64, err
+	//}
 
-	activatedTimestamp, err := finalityGadgetClient.QueryBtcStakingActivatedTimestamp()
+	activatedTimestamp, err := cc.fg.QueryBtcStakingActivatedTimestamp()
 	if err != nil {
 		cc.logger.Error("failed to query BTC staking activate timestamp", zap.Error(err))
 		return math.MaxUint64, err

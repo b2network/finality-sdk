@@ -1,12 +1,17 @@
 package finalitygadget
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"github.com/babylonlabs-io/finality-gadget/btcclient"
 	"github.com/babylonlabs-io/finality-gadget/cwclient"
+	"github.com/babylonlabs-io/finality-gadget/db"
 	"github.com/babylonlabs-io/finality-gadget/finalitygadget"
 	"github.com/babylonlabs-io/finality-gadget/testutil/mocks"
 	"github.com/babylonlabs-io/finality-provider/finality-provider/config"
+	"math"
+	"time"
 
 	bbnclient "github.com/babylonlabs-io/babylon/client/client"
 	bbncfg "github.com/babylonlabs-io/babylon/client/config"
@@ -19,13 +24,15 @@ import (
 var _ IFinalityGadgetCustom = &FinalityGadgetCustom{}
 
 type FinalityGadgetCustom struct {
-	btcClient finalitygadget.IBitcoinClient
-	cwClient  finalitygadget.ICosmWasmClient
-	bbnClient finalitygadget.IBabylonClient
-	logger    *zap.Logger
+	btcClient    finalitygadget.IBitcoinClient
+	cwClient     finalitygadget.ICosmWasmClient
+	bbnClient    finalitygadget.IBabylonClient
+	db           db.IDatabaseHandler
+	pollInterval time.Duration
+	logger       *zap.Logger
 }
 
-func NewFinalityGadgetCustom(cfg *config.FGConfig, logger *zap.Logger) (*FinalityGadgetCustom, error) {
+func NewFinalityGadgetCustom(cfg *config.FGConfig, db db.IDatabaseHandler, logger *zap.Logger) (*FinalityGadgetCustom, error) {
 	// Create babylon client
 	bbnConfig := bbncfg.DefaultBabylonConfig()
 	bbnConfig.RPCAddr = cfg.BBNRPCAddress
@@ -65,10 +72,12 @@ func NewFinalityGadgetCustom(cfg *config.FGConfig, logger *zap.Logger) (*Finalit
 
 	// Create finality gadget
 	return &FinalityGadgetCustom{
-		btcClient: btcClient,
-		bbnClient: bbnClient,
-		cwClient:  cwClient,
-		logger:    logger,
+		btcClient:    btcClient,
+		bbnClient:    bbnClient,
+		cwClient:     cwClient,
+		db:           db,
+		pollInterval: cfg.PollInterval,
+		logger:       logger,
 	}, nil
 }
 
@@ -167,6 +176,51 @@ func (fg *FinalityGadgetCustom) QueryIsBlockBabylonFinalized(block *types.Block)
 	return true, nil
 }
 
+// QueryBtcStakingActivatedTimestamp retrieves BTC staking activation timestamp from the database
+// returns math.MaxUint64, error if any error occurs
+func (fg *FinalityGadgetCustom) QueryBtcStakingActivatedTimestamp() (uint64, error) {
+	// First, try to get the timestamp from the database
+	timestamp, err := fg.db.GetActivatedTimestamp()
+	if err != nil {
+		// If error is not found, try to query it from the bbnClient
+		if errors.Is(err, types.ErrActivatedTimestampNotFound) {
+			fg.logger.Debug("activation timestamp hasn't been set yet, querying from bbnClient...")
+			return fg.queryBtcStakingActivationTimestamp()
+		}
+		fg.logger.Error("Failed to get activated timestamp from database", zap.Error(err))
+		return math.MaxUint64, err
+	}
+	fg.logger.Debug("BTC staking activated timestamp found in database", zap.Uint64("timestamp", timestamp))
+	return timestamp, nil
+}
+
+// Query the BTC staking activation timestamp from bbnClient
+// returns math.MaxUint64, ErrBtcStakingNotActivated if the BTC staking is not activated
+func (fg *FinalityGadgetCustom) queryBtcStakingActivationTimestamp() (uint64, error) {
+	allFpPks, err := fg.queryAllFpBtcPubKeys()
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	fg.logger.Debug("All consumer FP public keys", zap.Strings("allFpPks", allFpPks))
+
+	earliestDelHeight, err := fg.bbnClient.QueryEarliestActiveDelBtcHeight(allFpPks)
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	if earliestDelHeight == math.MaxUint64 {
+		return math.MaxUint64, types.ErrBtcStakingNotActivated
+	}
+	fg.logger.Debug("Earliest active delegation height", zap.Uint64("height", earliestDelHeight))
+
+	btcBlockTimestamp, err := fg.btcClient.GetBlockTimestampByHeight(earliestDelHeight)
+	if err != nil {
+		return math.MaxUint64, err
+	}
+	fg.logger.Debug("BTC staking activated at", zap.Uint64("timestamp", btcBlockTimestamp))
+
+	return btcBlockTimestamp, nil
+}
+
 func (fg *FinalityGadgetCustom) queryAllFpBtcPubKeys() ([]string, error) {
 	// get the consumer chain id
 	consumerId, err := fg.cwClient.QueryConsumerId()
@@ -180,4 +234,36 @@ func (fg *FinalityGadgetCustom) queryAllFpBtcPubKeys() ([]string, error) {
 		return nil, err
 	}
 	return allFpPks, nil
+}
+
+// periodically check and update the BTC staking activation timestamp
+// Exit the goroutine once we've successfully saved the timestamp
+func (fg *FinalityGadgetCustom) MonitorBtcStakingActivation(ctx context.Context) {
+	ticker := time.NewTicker(fg.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			timestamp, err := fg.queryBtcStakingActivationTimestamp()
+			if err != nil {
+				if errors.Is(err, types.ErrBtcStakingNotActivated) {
+					fg.logger.Debug("BTC staking not yet activated, waiting...")
+					continue
+				}
+				fg.logger.Error("Failed to query BTC staking activation timestamp", zap.Error(err))
+				continue
+			}
+
+			err = fg.db.SaveActivatedTimestamp(timestamp)
+			if err != nil {
+				fg.logger.Error("Failed to save activated timestamp to database", zap.Error(err))
+				continue
+			}
+			fg.logger.Debug("Saved BTC staking activated timestamp to database", zap.Uint64("timestamp", timestamp))
+			return
+		}
+	}
 }

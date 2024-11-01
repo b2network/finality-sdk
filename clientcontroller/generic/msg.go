@@ -68,8 +68,8 @@ type Content struct {
 }
 
 type LatestBlockResponse struct {
-	Error string       `json:"error"`
-	Data  *LatestBlock `json:"data"`
+	Error string     `json:"error"`
+	Data  *BlockInfo `json:"data"`
 }
 
 type LatestBlock struct {

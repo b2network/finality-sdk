@@ -43,12 +43,12 @@ func (cfg *OPStackL2Config) Validate() error {
 	if !strings.HasPrefix(cfg.OPFinalityGadgetAddress, cfg.AccountPrefix) {
 		return fmt.Errorf("op-finality-gadget: invalid address prefix: %w", err)
 	}
-	if cfg.BabylonFinalityGadgetRpc == "" {
-		return fmt.Errorf("babylon-finality-gadget-rpc is required")
-	}
-	if _, err := url.Parse(cfg.BabylonFinalityGadgetRpc); err != nil {
-		return fmt.Errorf("babylon-finality-gadget-rpc is not correctly formatted: %w", err)
-	}
+	//if cfg.BabylonFinalityGadgetRpc == "" {
+	//	return fmt.Errorf("babylon-finality-gadget-rpc is required")
+	//}
+	//if _, err := url.Parse(cfg.BabylonFinalityGadgetRpc); err != nil {
+	//	return fmt.Errorf("babylon-finality-gadget-rpc is not correctly formatted: %w", err)
+	//}
 	if _, err := url.Parse(cfg.RPCAddr); err != nil {
 		return fmt.Errorf("rpc-addr is not correctly formatted: %w", err)
 	}
