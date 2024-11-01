@@ -2,10 +2,10 @@ package clientcontroller
 
 import (
 	"fmt"
-
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/api"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/babylon"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/cosmwasm"
+	"github.com/babylonlabs-io/finality-provider/clientcontroller/generic"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/opstackl2"
 	cosmwasmcfg "github.com/babylonlabs-io/finality-provider/cosmwasmclient/config"
 	fpcfg "github.com/babylonlabs-io/finality-provider/finality-provider/config"
@@ -16,6 +16,7 @@ const (
 	BabylonConsumerChainType   = "babylon"
 	OPStackL2ConsumerChainType = "OPStackL2"
 	WasmConsumerChainType      = "wasm"
+	GenericChainType           = "generic"
 )
 
 // NewClientController TODO: this is always going to be babylon so rename accordingly
@@ -50,6 +51,11 @@ func NewConsumerController(config *fpcfg.Config, logger *zap.Logger) (api.Consum
 		ccc, err = cosmwasm.NewCosmwasmConsumerController(config.CosmwasmConfig, wasmEncodingCfg, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Wasm rpc client: %w", err)
+		}
+	case GenericChainType:
+		ccc, err = generic.NewGenericConsumerController(config.ConsumerGenericConfig, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Storage consumer client: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported consumer chain")

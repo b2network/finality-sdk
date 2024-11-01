@@ -1,10 +1,11 @@
-package storage
+package generic
 
 import (
 	"context"
 	sdkErr "cosmossdk.io/errors"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	wasmdparams "github.com/CosmWasm/wasmd/app/params"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
@@ -13,7 +14,6 @@ import (
 	bbntypes "github.com/babylonlabs-io/babylon/types"
 	btcstakingtypes "github.com/babylonlabs-io/babylon/x/btcstaking/types"
 	"github.com/babylonlabs-io/finality-provider/clientcontroller/api"
-	"github.com/babylonlabs-io/finality-provider/clientcontroller/storage/db"
 	cwclient "github.com/babylonlabs-io/finality-provider/cosmwasmclient/client"
 	cwconfig "github.com/babylonlabs-io/finality-provider/cosmwasmclient/config"
 	fpcfg "github.com/babylonlabs-io/finality-provider/finality-provider/config"
@@ -24,6 +24,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkquerytypes "github.com/cosmos/cosmos-sdk/types/query"
 	"github.com/cosmos/relayer/v2/relayer/provider"
+	"github.com/go-resty/resty/v2"
+	"github.com/spf13/cast"
 	"go.uber.org/zap"
 )
 
@@ -31,17 +33,18 @@ const (
 	BabylonChainName = "Babylon"
 )
 
-var _ api.ConsumerController = &StorageConsumerController{}
+var _ api.ConsumerController = &GenericConsumerController{}
 
-type StorageConsumerController struct {
-	Cfg       *fpcfg.ConsumerStorageConfig
-	CwClient  *cwclient.Client
-	bbnClient *bbnclient.Client
-	DB        *db.BBoltHandler
-	logger    *zap.Logger
+type GenericConsumerController struct {
+	Cfg        *fpcfg.ConsumerGenericConfig
+	CwClient   *cwclient.Client
+	bbnClient  *bbnclient.Client
+	namespace  string
+	serviceRpc string
+	logger     *zap.Logger
 }
 
-func NewStorageConsumerController(cfg *fpcfg.ConsumerStorageConfig, bbdb *db.BBoltHandler, logger *zap.Logger) (*StorageConsumerController, error) {
+func NewGenericConsumerController(cfg *fpcfg.ConsumerGenericConfig, logger *zap.Logger) (*GenericConsumerController, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config for storage consumer controller")
 	}
@@ -70,12 +73,13 @@ func NewStorageConsumerController(cfg *fpcfg.ConsumerStorageConfig, bbdb *db.BBo
 		return nil, fmt.Errorf("failed to create Babylon client: %w", err)
 	}
 
-	return &StorageConsumerController{
-		Cfg:       cfg,
-		CwClient:  cwClient,
-		bbnClient: bc,
-		DB:        bbdb,
-		logger:    logger,
+	return &GenericConsumerController{
+		Cfg:        cfg,
+		CwClient:   cwClient,
+		bbnClient:  bc,
+		serviceRpc: cfg.ServiceRPC,
+		namespace:  cfg.Namespace,
+		logger:     logger,
 	}, nil
 }
 
@@ -102,11 +106,11 @@ func NewCwClient(cwConfig *cwconfig.CosmwasmConfig, logger *zap.Logger) (*cwclie
 	return cwClient, err
 }
 
-func (cc *StorageConsumerController) ReliablySendMsg(msg sdk.Msg, expectedErrs []*sdkErr.Error, unrecoverableErrs []*sdkErr.Error) (*provider.RelayerTxResponse, error) {
+func (cc *GenericConsumerController) ReliablySendMsg(msg sdk.Msg, expectedErrs []*sdkErr.Error, unrecoverableErrs []*sdkErr.Error) (*provider.RelayerTxResponse, error) {
 	return cc.reliablySendMsgs([]sdk.Msg{msg}, expectedErrs, unrecoverableErrs)
 }
 
-func (cc *StorageConsumerController) reliablySendMsgs(msgs []sdk.Msg, expectedErrs []*sdkErr.Error, unrecoverableErrs []*sdkErr.Error) (*provider.RelayerTxResponse, error) {
+func (cc *GenericConsumerController) reliablySendMsgs(msgs []sdk.Msg, expectedErrs []*sdkErr.Error, unrecoverableErrs []*sdkErr.Error) (*provider.RelayerTxResponse, error) {
 	return cc.CwClient.ReliablySendMsgs(
 		context.Background(),
 		msgs,
@@ -115,7 +119,7 @@ func (cc *StorageConsumerController) reliablySendMsgs(msgs []sdk.Msg, expectedEr
 	)
 }
 
-func (cc StorageConsumerController) CommitPubRandList(fpPk *btcec.PublicKey, startHeight uint64, numPubRand uint64, commitment []byte, sig *schnorr.Signature) (*types.TxResponse, error) {
+func (cc GenericConsumerController) CommitPubRandList(fpPk *btcec.PublicKey, startHeight uint64, numPubRand uint64, commitment []byte, sig *schnorr.Signature) (*types.TxResponse, error) {
 	msg := CommitPublicRandomnessMsg{
 		CommitPublicRandomness: CommitPublicRandomnessMsgParams{
 			FpPubkeyHex: bbntypes.NewBIP340PubKeyFromBTCPK(fpPk).MarshalHex(),
@@ -151,7 +155,7 @@ func ConvertProof(cmtProof cmtcrypto.Proof) Proof {
 	}
 }
 
-func (cc StorageConsumerController) SubmitFinalitySig(fpPk *btcec.PublicKey, block *types.BlockInfo, pubRand *btcec.FieldVal, proof []byte, sig *btcec.ModNScalar) (*types.TxResponse, error) {
+func (cc GenericConsumerController) SubmitFinalitySig(fpPk *btcec.PublicKey, block *types.BlockInfo, pubRand *btcec.FieldVal, proof []byte, sig *btcec.ModNScalar) (*types.TxResponse, error) {
 	cmtProof := cmtcrypto.Proof{}
 	if err := cmtProof.Unmarshal(proof); err != nil {
 		return nil, err
@@ -170,6 +174,7 @@ func (cc StorageConsumerController) SubmitFinalitySig(fpPk *btcec.PublicKey, blo
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("submit sig msg:" + cast.ToString(block.Height))
 	execMsg := &wasmtypes.MsgExecuteContract{
 		Sender:   cc.CwClient.MustGetAddr(),
 		Contract: cc.Cfg.FinalityGadgetAddress,
@@ -188,7 +193,7 @@ func (cc StorageConsumerController) SubmitFinalitySig(fpPk *btcec.PublicKey, blo
 	return &types.TxResponse{TxHash: res.TxHash}, nil
 }
 
-func (cc StorageConsumerController) SubmitBatchFinalitySigs(fpPk *btcec.PublicKey, blocks []*types.BlockInfo, pubRandList []*btcec.FieldVal, proofList [][]byte, sigs []*btcec.ModNScalar) (*types.TxResponse, error) {
+func (cc GenericConsumerController) SubmitBatchFinalitySigs(fpPk *btcec.PublicKey, blocks []*types.BlockInfo, pubRandList []*btcec.FieldVal, proofList [][]byte, sigs []*btcec.ModNScalar) (*types.TxResponse, error) {
 	if len(blocks) != len(sigs) {
 		return nil, fmt.Errorf("the number of blocks %v should match the number of finality signatures %v", len(blocks), len(sigs))
 	}
@@ -209,6 +214,7 @@ func (cc StorageConsumerController) SubmitBatchFinalitySigs(fpPk *btcec.PublicKe
 				Signature:   bbntypes.NewSchnorrEOTSSigFromModNScalar(sigs[i]).MustMarshal(),
 			},
 		}
+		fmt.Printf("submit batch sig msg:" + cast.ToString(block.Height))
 		payload, err := json.Marshal(msg)
 		if err != nil {
 			return nil, err
@@ -233,7 +239,7 @@ func (cc StorageConsumerController) SubmitBatchFinalitySigs(fpPk *btcec.PublicKe
 	return &types.TxResponse{TxHash: res.TxHash}, nil
 }
 
-func (cc StorageConsumerController) QueryFinalityProviderHasPower(fpPk *btcec.PublicKey, blockHeight uint64) (bool, error) {
+func (cc GenericConsumerController) QueryFinalityProviderHasPower(fpPk *btcec.PublicKey, blockHeight uint64) (bool, error) {
 	fpBtcPkHex := bbntypes.NewBIP340PubKeyFromBTCPK(fpPk).MarshalHex()
 	var nextKey []byte
 
@@ -268,22 +274,23 @@ func (cc StorageConsumerController) QueryFinalityProviderHasPower(fpPk *btcec.Pu
 	return false, nil
 }
 
-func (cc StorageConsumerController) QueryLatestFinalizedBlock() (*types.BlockInfo, error) {
-	block, err := cc.DB.QueryLatestFinalizedBlock()
+func (cc GenericConsumerController) QueryLatestFinalizedBlock() (*types.BlockInfo, error) {
+	client := resty.New()
+	resp, err := client.R().Get(cc.serviceRpc + "/v1/api/latest-block?namespace=" + cc.namespace)
 	if err != nil {
 		return nil, err
 	}
-	if block.BlockHeight == 0 {
-		return nil, nil
+	var latestBlock LatestBlockResponse
+	err = json.Unmarshal(resp.Body(), &latestBlock)
+	if err != nil {
+		return nil, err
 	}
-	blockHashBytes, err := hex.DecodeString(block.BlockHash)
-	return &types.BlockInfo{
-		Height: block.BlockHeight,
-		Hash:   blockHashBytes,
-	}, nil
+	//TODO
+	latestBlockNum := latestBlock.Data.LatestBlock - 32
+	return cc.QueryBlock(latestBlockNum)
 }
 
-func (cc StorageConsumerController) QueryLastPublicRandCommit(fpPk *btcec.PublicKey) (*types.PubRandCommit, error) {
+func (cc GenericConsumerController) QueryLastPublicRandCommit(fpPk *btcec.PublicKey) (*types.PubRandCommit, error) {
 	fpPubKey := bbntypes.NewBIP340PubKeyFromBTCPK(fpPk)
 	queryMsg := &QueryMsg{
 		LastPubRandCommit: &PubRandCommit{
@@ -319,28 +326,33 @@ func (cc StorageConsumerController) QueryLastPublicRandCommit(fpPk *btcec.Public
 	return resp, nil
 }
 
-func (cc StorageConsumerController) QueryBlock(height uint64) (*types.BlockInfo, error) {
-	block, err := cc.DB.GetBlockByHeight(height)
+func (cc GenericConsumerController) QueryBlock(height uint64) (*types.BlockInfo, error) {
+	client := resty.New()
+	blockResp, err := client.R().Get(cc.serviceRpc + "/v1/api/get-block?namespace=" + cc.namespace + "&height=" + cast.ToString(height))
 	if err != nil {
-		return nil, fmt.Errorf("failed to query block by height: %w", err)
+		return nil, err
 	}
-	blockHashBytes, err := hex.DecodeString(block.BlockHash)
+	var l2BlockRsp *GetBlockResponse
+	err = json.Unmarshal(blockResp.Body(), &l2BlockRsp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode block hash: %w", err)
+		return nil, err
+	}
+	if l2BlockRsp.Error != "" {
+		return nil, errors.New(l2BlockRsp.Error)
 	}
 
-	cc.logger.Debug(
-		"QueryBlock",
-		zap.Uint64("height", height),
-		zap.String("block_hash", block.BlockHash),
-	)
+	hashByte, err := hex.DecodeString(l2BlockRsp.Data.Hash[2:])
+	if err != nil {
+		return nil, err
+	}
+
 	return &types.BlockInfo{
-		Height: height,
-		Hash:   blockHashBytes,
+		Height: l2BlockRsp.Data.Height,
+		Hash:   hashByte,
 	}, nil
 }
 
-func (cc StorageConsumerController) QueryIsBlockFinalized(height uint64) (bool, error) {
+func (cc GenericConsumerController) QueryIsBlockFinalized(height uint64) (bool, error) {
 	l2Block, err := cc.QueryLatestFinalizedBlock()
 	if err != nil {
 		return false, err
@@ -354,20 +366,20 @@ func (cc StorageConsumerController) QueryIsBlockFinalized(height uint64) (bool, 
 	return true, nil
 }
 
-func (cc StorageConsumerController) QueryBlocks(startHeight, endHeight, limit uint64) ([]*types.BlockInfo, error) {
+func (cc GenericConsumerController) QueryBlocks(startHeight, endHeight, limit uint64) ([]*types.BlockInfo, error) {
 	//TODO  range scans
 	return nil, nil
 }
 
-func (cc StorageConsumerController) QueryLatestBlockHeight() (uint64, error) {
-	block, err := cc.DB.QueryLatestFinalizedBlock()
+func (cc GenericConsumerController) QueryLatestBlockHeight() (uint64, error) {
+	block, err := cc.QueryLatestFinalizedBlock()
 	if err != nil {
 		return 0, err
 	}
-	return block.BlockHeight, nil
+	return block.Height, nil
 }
 
-func (cc StorageConsumerController) QueryActivatedHeight() (uint64, error) {
+func (cc GenericConsumerController) QueryActivatedHeight() (uint64, error) {
 	//res, err := cc.bbnClient.QueryClient.ActivatedHeight()
 	//if err != nil {
 	//	return 0, fmt.Errorf("failed to query activated height: %w", err)
@@ -377,15 +389,11 @@ func (cc StorageConsumerController) QueryActivatedHeight() (uint64, error) {
 	return 0, nil
 }
 
-func (cc StorageConsumerController) Close() error {
-	err := cc.DB.Close()
-	if err != nil {
-		return err
-	}
+func (cc GenericConsumerController) Close() error {
 	return cc.CwClient.Stop()
 }
 
-func (cc *StorageConsumerController) isDelegationActive(
+func (cc *GenericConsumerController) isDelegationActive(
 	btcStakingParams *btcstakingtypes.QueryParamsResponse,
 	btcDel *btcstakingtypes.BTCDelegationResponse,
 ) (bool, error) {

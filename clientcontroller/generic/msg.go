@@ -1,4 +1,4 @@
-package storage
+package generic
 
 type CommitPublicRandomnessMsg struct {
 	CommitPublicRandomness CommitPublicRandomnessMsgParams `json:"commit_public_randomness"`
@@ -65,4 +65,24 @@ type Proof struct {
 type Content struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+type LatestBlockResponse struct {
+	Error string       `json:"error"`
+	Data  *LatestBlock `json:"data"`
+}
+
+type LatestBlock struct {
+	LatestBlock uint64 `json:"latest_block"`
+}
+
+type GetBlockResponse struct {
+	Error string     `json:"error"`
+	Data  *BlockInfo `json:"data"`
+}
+
+type BlockInfo struct {
+	Height    uint64 `json:"height"`
+	Hash      string `json:"hash"`
+	Timestamp uint64 `json:"timestamp"`
 }
